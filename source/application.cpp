@@ -9,11 +9,16 @@
 
 #include <cmath>
 
+#include <array>
+#include <cstddef>
+#include <cstdint>
+
 namespace application {
 
     struct Vertex { // создаем собственный составной тип данных с названием
-		float position[3]; // массив вещественных чисел со значениями координат x, y, z
-	};
+        float position[3]; // Координаты вершины X, Y, Z
+        float normal[3];   // Компоненты нормали NX, NY, NZ
+    };
 
     constexpr Vertex vertices[] = { // значение можно вычислить во время компиляции; тип элементов массива; название массива; компилятор сам определит кол-во эл-ов
         // Ребро AB
@@ -80,27 +85,143 @@ namespace application {
         6, 10, 7
     };
 
+    // Количество вершин после разворачивания треугольников
+    constexpr std::size_t expanded_vertex_count =
+        sizeof(indices) / sizeof(indices[0]);
+
+    // Вершины с вычисленными нормалями и новые индексы
+    std::array<Vertex, expanded_vertex_count> vertices_with_normals{};
+    std::array<uint32_t, expanded_vertex_count> expanded_indices{};
+
+    // Процедурная генерация нормалей для всех треугольников
+    void generateVertexNormals() {
+        for (std::size_t i = 0; i < expanded_vertex_count; i += 3) {
+            const Vertex& a = vertices[indices[i]];
+            const Vertex& b = vertices[indices[i + 1]];
+            const Vertex& c = vertices[indices[i + 2]];
+
+            // Строим два вектора вдоль сторон треугольника
+            float ux = b.position[0] - a.position[0];
+            float uy = b.position[1] - a.position[1];
+            float uz = b.position[2] - a.position[2];
+
+            float vx = c.position[0] - a.position[0];
+            float vy = c.position[1] - a.position[1];
+            float vz = c.position[2] - a.position[2];
+
+            // Векторное произведение двух сторон даёт нормаль
+            float nx = uy * vz - uz * vy;
+            float ny = uz * vx - ux * vz;
+            float nz = ux * vy - uy * vx;
+
+            // Нормализуем вектор до единичной длины
+            float length = std::sqrt(nx * nx + ny * ny + nz * nz);
+
+            if (length < 0.000001f) {
+                continue;
+            }
+
+            nx /= length;
+            ny /= length;
+            nz /= length;
+
+            // Находим центр треугольника
+            float cx = (a.position[0] + b.position[0] + c.position[0]) / 3.0f;
+            float cy = (a.position[1] + b.position[1] + c.position[1]) / 3.0f;
+            float cz = (a.position[2] + b.position[2] + c.position[2]) / 3.0f;
+
+            // Направляем нормаль наружу от центра фигуры
+            if (nx * cx + ny * cy + nz * cz < 0.0f) {
+                nx = -nx;
+                ny = -ny;
+                nz = -nz;
+            }
+
+            // Каждая вершина треугольника получает его нормаль
+            for (std::size_t j = 0; j < 3; ++j) {
+                std::size_t index = i + j;
+
+                vertices_with_normals[index] = vertices[indices[index]];
+
+                vertices_with_normals[index].normal[0] = nx;
+                vertices_with_normals[index].normal[1] = ny;
+                vertices_with_normals[index].normal[2] = nz;
+
+                expanded_indices[index] = static_cast<uint32_t>(index);
+            }
+        }
+    }
+
 	VkBuffer vk_vertex_buffer = VK_NULL_HANDLE; // создаём переменную типа VkBuffer с названием vk_vertex_buffer; пока буфер не создан, переменная не содержит действительного дескриптора буфера
 	VmaAllocation vk_vertex_buffer_allocation = nullptr; // тип, предоставляемый библиотекой Vulkan Memory Allocator (позволяет управлять выделенной для него памятью); объект, через который VMA управляет выделенной памятью; пока никакая память не выделена
     VkBuffer vk_index_buffer = VK_NULL_HANDLE; // создаём переменную типа VkBuffer с названием vk_index_buffer, в которой будет храниться дескриптор нашего индексного буфера.
     VmaAllocation vk_index_buffer_allocation = nullptr;
 
-    VkBuffer vk_uniform_buffer = VK_NULL_HANDLE;
-    VmaAllocation vk_uniform_buffer_allocation = nullptr;
+    // Буфер общих данных сцены
+    VkBuffer vk_scene_uniform_buffer = VK_NULL_HANDLE;
+    VmaAllocation vk_scene_uniform_buffer_allocation = nullptr;
+
+    // Буфер данных модели
+    VkBuffer vk_model_uniform_buffer = VK_NULL_HANDLE;
+    VmaAllocation vk_model_uniform_buffer_allocation = nullptr;
 
     VkShaderModule vk_vertex_shader = VK_NULL_HANDLE;
     VkShaderModule vk_fragment_shader = VK_NULL_HANDLE;
 
-    VkDescriptorSetLayout vk_descriptor_set_layout = VK_NULL_HANDLE;
+    // Схемы наборов дескрипторов сцены и модели
+    VkDescriptorSetLayout vk_scene_descriptor_set_layout = VK_NULL_HANDLE;
+    VkDescriptorSetLayout vk_model_descriptor_set_layout = VK_NULL_HANDLE;
+
+    // Общий пул для выделения наборов дескрипторов
     VkDescriptorPool vk_descriptor_pool = VK_NULL_HANDLE;
-    VkDescriptorSet vk_descriptor_set = VK_NULL_HANDLE;
+
+    // Наборы дескрипторов сцены и модели
+    VkDescriptorSet vk_scene_descriptor_set = VK_NULL_HANDLE;
+    VkDescriptorSet vk_model_descriptor_set = VK_NULL_HANDLE;
+
     VkPipelineLayout vk_pipeline_layout = VK_NULL_HANDLE; // объект, описывающий интерфейс передачи некоторых ресурсов и данных в шейдеры
     VkPipeline vk_pipeline = VK_NULL_HANDLE; //handle графического конвейера, содержащего настройки обработки и отрисовки
 
-    struct UniformBufferObject {
-        float mvp[16];
-        float tint[4];
+
+    // Общие данные сцены (descriptor set = 0)
+    struct alignas(16) SceneUniforms {
+        float view_projection[16];
+
+        // Положение камеры в мировых координатах
+        alignas(16) float camera_position[3];
+
+        // Направление направленного источника света
+        alignas(16) float directional_light_direction[3];
+
+        // Цвет и интенсивность направленного света
+        alignas(16) float directional_light_color[3];
+
+        // Цвет и интенсивность фонового освещения
+        alignas(16) float ambient_light[3];
+
+        // Количество точечных источников и прожекторов
+        uint32_t point_light_count;
+        uint32_t spot_light_count;
     };
+
+    // Данные отдельной модели (descriptor set = 1)
+    struct alignas(16) ModelUniform {
+        // Матрица преобразования модели
+        float model[16];
+
+        // Основной цвет материала
+        alignas(16) float albedo[3];
+
+        // Цвет зеркального блика
+        alignas(16) float specular[3];
+
+        // Коэффициент блеска материала
+        float alpha;
+    };
+
+    // Проверяем размеры структур для std140
+    static_assert(sizeof(SceneUniforms) == 144);
+    static_assert(sizeof(ModelUniform) == 96);
 
     // Положение фигуры по осям X, Y, Z
     float object_position[3] = { 0.0f, 0.0f, 0.0f };
@@ -114,9 +235,36 @@ namespace application {
     // Тип проекции
     bool use_perspective = true;
 
+    // Положение камеры в мировых координатах
+    float camera_position[3] = { 0.0f, 0.0f, 6.0f };
+
+    // Углы поворота камеры вокруг осей X, Y и Z в градусах
+    float camera_rotation[3] = { 0.0f, 0.0f, 0.0f };
+
+    // Вертикальный угол обзора камеры в градусах (field of view)
+    float camera_fov = 60.0f;
+
     // Цветовой множитель RGB
     float object_color[3] = { 1.0f, 1.0f, 1.0f };
 
+
+    // Направление направленного источника света
+    float light_direction[3] = { -0.5f, -1.0f, -0.5f };
+
+    // Цвет направленного источника света
+    float light_color[3] = { 1.0f, 1.0f, 1.0f };
+
+    // Интенсивность направленного источника
+    float light_intensity = 1.0f;
+
+    // Фоновое освещение
+    float ambient_color[3] = { 0.15f, 0.15f, 0.15f };
+
+    // Цвет зеркального блика материала
+    float material_specular[3] = { 1.0f, 1.0f, 1.0f };
+
+    // Коэффициент блеска материала
+    float material_alpha = 32.0f;
 
     bool animation_enabled = false;
     bool animation_paused = false;
@@ -135,16 +283,25 @@ namespace application {
     // откуда брать данные вершин и как переходить от одной вершины к следующей
     constexpr VkVertexInputBindingDescription vertex_binding{ //структура Vulkan, описывающая источник вершинных данных
         .binding = 0, // задаём номер привязки источника вершинных данных
-        .stride = sizeof(Vertex), // шаг; указываем, что следующая вершина начинается через 12 байт
+        .stride = sizeof(Vertex), // шаг; указываем, что следующая вершина начинается через 24 байт
         .inputRate = VK_VERTEX_INPUT_RATE_VERTEX, // данные переходят к следующей вершине при обработке очередной вершины
     };
 
     // какие именно данные находятся внутри одной вершины и как их интерпретировать
-    constexpr VkVertexInputAttributeDescription vertex_attribute{
-        .location = 0, // Номер входного атрибута, с которым будет работать вершинный шейдер
-        .binding = 0, // Используем описание буфера с номером 0
-        .format = VK_FORMAT_R32G32B32_SFLOAT, // Читаем три 32-битных числа с плавающей точкой
-        .offset = 0, // Координаты начинаются с самого начала структуры Vertex
+    // Описываем два атрибута каждой вершины
+    constexpr VkVertexInputAttributeDescription vertex_attributes[] = {
+        {
+            .location = 0, // координаты позиции
+            .binding = 0, // номер вершинного буфера
+            .format = VK_FORMAT_R32G32B32_SFLOAT,
+			.offset = offsetof(Vertex, position), // смещение в байтах от начала структуры Vertex до поля position
+        },
+        {
+			.location = 1, // компоненты нормали
+			.binding = 0,
+            .format = VK_FORMAT_R32G32B32_SFLOAT,
+            .offset = offsetof(Vertex, normal),
+        },
     };
 
     VkShaderModule loadShader(const char* filename) {
@@ -304,10 +461,12 @@ namespace application {
     }
 
     // Матрица перспективной проекции
-    Mat4 perspective(float aspect) {
+    Mat4 perspective(float aspect, float fov_degrees) {
         Mat4 result{};
 
-        const float fov = 60.0f * 3.14159265f / 180.0f;
+        // Переводим угол обзора из градусов в радианы
+        const float fov = fov_degrees * 3.14159265f / 180.0f;
+
         const float nearPlane = 0.1f;
         const float farPlane = 100.0f;
 
@@ -366,8 +525,8 @@ namespace application {
             .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
             .vertexBindingDescriptionCount = 1,
             .pVertexBindingDescriptions = &vertex_binding,
-            .vertexAttributeDescriptionCount = 1,
-            .pVertexAttributeDescriptions = &vertex_attribute,
+            .vertexAttributeDescriptionCount = 2,
+            .pVertexAttributeDescriptions = vertex_attributes,
         };
 
         // Указываем, что рисуем отдельные треугольники (примитивы)
@@ -434,11 +593,17 @@ namespace application {
             .pDynamicStates = dynamic_states,
         };
 
-        // Описываем наборы дескрипторов, используемые графическим конвейером
+        // Схемы наборов дескрипторов для графического конвейера
+        const VkDescriptorSetLayout descriptor_layouts[] = {
+            vk_scene_descriptor_set_layout,
+            vk_model_descriptor_set_layout,
+        };
+
+        // Графический конвейер использует два набора дескрипторов
         const VkPipelineLayoutCreateInfo pipeline_layout_info{
             .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
-            .setLayoutCount = 1, // Pipeline Layout использует одну схему набора дескрипторов
-            .pSetLayouts = &vk_descriptor_set_layout,
+            .setLayoutCount = 2,
+            .pSetLayouts = descriptor_layouts,
         };
 
         if (vkCreatePipelineLayout(
@@ -491,9 +656,19 @@ namespace application {
 	bool initialize() {
         auto& context = graphics::internal::context;
 
+        // Генерируем нормали до создания вершинного буфера
+        generateVertexNormals();
+
+        // Размеры новых массивов вершин и индексов
+        const std::size_t vertex_data_size =
+            vertices_with_normals.size() * sizeof(Vertex);
+
+        const std::size_t index_data_size =
+            expanded_indices.size() * sizeof(uint32_t);
+
         const VkBufferCreateInfo vertex_buffer_info{
             .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
-			.size = sizeof(vertices), // 3 * 4 = 12 байт -> 12 вершин * 12 байт = 144 байт (занимают все вершины) размер буфера в байтах; sizeof возвращает размер в байтах, занимаемый объектом или типом данных; в данном случае, размер массива vertices
+            .size = vertex_data_size,
             .usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, // Для чего будет использоваться буфер
             .sharingMode = VK_SHARING_MODE_EXCLUSIVE, // Режим владения буфером очередями GPU
         };
@@ -524,8 +699,8 @@ namespace application {
 
 		std::memcpy( // копируем данные вершин в выделенную память; функция копирует sizeof(vertices) байт из массива vertices в память, на которую указывает allocation_info.pMappedData
             allocation_info.pMappedData,
-            vertices,
-            sizeof(vertices)
+            vertices_with_normals.data(),
+            vertex_data_size
         );
 
 		vmaFlushAllocation( // Обеспечиваем видимость записанных CPU данных для GPU
@@ -537,7 +712,7 @@ namespace application {
 
         const VkBufferCreateInfo index_buffer_info{
             .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
-			.size = sizeof(indices), // 60 индексов * 4 байта = 240 байт (занимают все индексы) размер буфера в байтах; sizeof возвращает размер в байтах, занимаемый объектом или типом данных; в данном случае, размер массива indices
+            .size = index_data_size, // 60 индексов * 4 байта = 240 байт (занимают все индексы) размер буфера в байтах; sizeof возвращает размер в байтах, занимаемый объектом или типом данных; в данном случае, размер массива indices
             .usage = VK_BUFFER_USAGE_INDEX_BUFFER_BIT, // для чего будет использоваться буфер
             .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
         };
@@ -576,8 +751,8 @@ namespace application {
 
         std::memcpy( // копируем индексы
             index_allocation.pMappedData,
-            indices,
-            sizeof(indices)
+            expanded_indices.data(),
+            index_data_size
         );
 
         vmaFlushAllocation( // flush отвечает именно за видимость записей в памяти, т.е. мы обеспечили видимость данных для GPU
@@ -587,9 +762,10 @@ namespace application {
             VK_WHOLE_SIZE
         );
 
-        const VkBufferCreateInfo uniform_buffer_info{ // описываем параметры создаваемого буфера
+        // Общие параметры создания Uniform Buffer
+        const VkBufferCreateInfo uniform_buffer_info{
             .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
-            .size = sizeof(UniformBufferObject),
+            .size = sizeof(SceneUniforms),
             .usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
             .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
         };
@@ -600,48 +776,102 @@ namespace application {
             .usage = VMA_MEMORY_USAGE_AUTO,
         };
 
+        // Описываем Uniform Buffer для общих данных сцены
+        VkBufferCreateInfo scene_buffer_info = uniform_buffer_info;
+
+        // Размер буфера равен размеру структуры SceneUniforms
+        scene_buffer_info.size = sizeof(SceneUniforms);
+
+        // Создаём буфер и выделяем память через VMA
         if (vmaCreateBuffer(
             context.allocator,
-            &uniform_buffer_info,
+            &scene_buffer_info,
             &uniform_allocation_info,
-            &vk_uniform_buffer,
-            &vk_uniform_buffer_allocation,
+            &vk_scene_uniform_buffer,
+            &vk_scene_uniform_buffer_allocation,
             nullptr
         ) != VK_SUCCESS) {
             return false;
         }
 
-        const VkDescriptorSetLayoutBinding ubo_binding{ // описание отдельной привязки
+        // Описываем Uniform Buffer для данных модели
+        VkBufferCreateInfo model_buffer_info = uniform_buffer_info;
+
+        // Размер буфера равен размеру структуры ModelUniform
+        model_buffer_info.size = sizeof(ModelUniform);
+
+        // Создаём буфер и выделяем память через VMA
+        if (vmaCreateBuffer(
+            context.allocator,
+            &model_buffer_info,
+            &uniform_allocation_info,
+            &vk_model_uniform_buffer,
+            &vk_model_uniform_buffer_allocation,
+            nullptr
+        ) != VK_SUCCESS) {
+            return false;
+        }
+
+        // Привязка Uniform Buffer с общими данными сцены
+        const VkDescriptorSetLayoutBinding scene_ubo_binding{
             .binding = 0,
             .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
-			.descriptorCount = 1, // количество дескрипторов внутри этой привязки (у нас один Uniform Buffer)
-            .stageFlags = VK_SHADER_STAGE_VERTEX_BIT, // набор стадий шейдеров, которым доступен ресурс
-            .pImmutableSamplers = nullptr,
+            .descriptorCount = 1,
+            .stageFlags = VK_SHADER_STAGE_VERTEX_BIT |
+                          VK_SHADER_STAGE_FRAGMENT_BIT,
         };
 
-        const VkDescriptorSetLayoutCreateInfo descriptor_layout_info{
+        // Привязка Uniform Buffer с данными модели
+        const VkDescriptorSetLayoutBinding model_ubo_binding{
+            .binding = 0,
+            .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+            .descriptorCount = 1,
+            .stageFlags = VK_SHADER_STAGE_VERTEX_BIT |
+                          VK_SHADER_STAGE_FRAGMENT_BIT,
+        };
+
+        // Описываем схему набора дескрипторов сцены
+        const VkDescriptorSetLayoutCreateInfo scene_layout_info{
             .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
             .bindingCount = 1,
-            .pBindings = &ubo_binding,
+            .pBindings = &scene_ubo_binding,
         };
 
+        // Создаём схему набора дескрипторов сцены
         if (vkCreateDescriptorSetLayout(
             context.device,
-            &descriptor_layout_info,
+            &scene_layout_info,
             nullptr,
-            &vk_descriptor_set_layout
+            &vk_scene_descriptor_set_layout
+        ) != VK_SUCCESS) {
+            return false;
+        }
+
+        // Описываем схему набора дескрипторов модели
+        const VkDescriptorSetLayoutCreateInfo model_layout_info{
+            .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+            .bindingCount = 1,
+            .pBindings = &model_ubo_binding,
+        };
+
+        // Создаём схему набора дескрипторов модели
+        if (vkCreateDescriptorSetLayout(
+            context.device,
+            &model_layout_info,
+            nullptr,
+            &vk_model_descriptor_set_layout
         ) != VK_SUCCESS) {
             return false;
         }
 
         const VkDescriptorPoolSize pool_size{ // количество дескрипторов определённого типа
             .type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
-            .descriptorCount = 1,
+            .descriptorCount = 2,
         };
 
         const VkDescriptorPoolCreateInfo pool_info{
             .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
-            .maxSets = 1,
+            .maxSets = 2,
             .poolSizeCount = 1,
             .pPoolSizes = &pool_size,
         };
@@ -655,25 +885,47 @@ namespace application {
             return false;
         }
 
+        // Массив схем в порядке номеров set
+        const VkDescriptorSetLayout descriptor_layouts[] = {
+            vk_scene_descriptor_set_layout,
+            vk_model_descriptor_set_layout,
+        };
+
+        // Описываем выделение двух наборов дескрипторов
         const VkDescriptorSetAllocateInfo allocate_info{
             .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
             .descriptorPool = vk_descriptor_pool,
-            .descriptorSetCount = 1,
-            .pSetLayouts = &vk_descriptor_set_layout,
+            .descriptorSetCount = 2,
+            .pSetLayouts = descriptor_layouts,
         };
 
+        VkDescriptorSet descriptor_sets[2]{};
+
+        // Выделяем оба набора из общего пула
         if (vkAllocateDescriptorSets(
             context.device,
             &allocate_info,
-            &vk_descriptor_set
+            descriptor_sets
         ) != VK_SUCCESS) {
             return false;
         }
 
-        const VkDescriptorBufferInfo descriptor_buffer_info{ // буфер и какую область внутри него должен использовать дескриптор
-            .buffer = vk_uniform_buffer,
+        // Сохраняем полученные наборы
+        vk_scene_descriptor_set = descriptor_sets[0];
+        vk_model_descriptor_set = descriptor_sets[1];
+
+        // Дескриптор буфера общих данных сцены
+        const VkDescriptorBufferInfo scene_buffer_descriptor{
+            .buffer = vk_scene_uniform_buffer,
             .offset = 0,
-            .range = sizeof(UniformBufferObject),
+            .range = sizeof(SceneUniforms),
+        };
+
+        // Новый Uniform Buffer модели
+        const VkDescriptorBufferInfo model_buffer_descriptor{
+            .buffer = vk_model_uniform_buffer,
+            .offset = 0,
+            .range = sizeof(ModelUniform),
         };
 
         vk_vertex_shader = loadShader("shaders/basic.vert.spv");
@@ -685,20 +937,31 @@ namespace application {
             return false;
         }
 
-		const VkWriteDescriptorSet descriptor_write{ // структура, описывающая операцию записи информации о ресурсах в Descriptor Set
-            .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-            .dstSet = vk_descriptor_set,
-            .dstBinding = 0,
-            .dstArrayElement = 0,
-            .descriptorCount = 1,
-            .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
-            .pBufferInfo = &descriptor_buffer_info,
+        // Записываем ссылки на буферы в два набора дескрипторов
+        const VkWriteDescriptorSet descriptor_writes[] = {
+            {
+                .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                .dstSet = vk_scene_descriptor_set,
+                .dstBinding = 0,
+                .descriptorCount = 1,
+                .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+                .pBufferInfo = &scene_buffer_descriptor,
+            },
+            {
+                .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                .dstSet = vk_model_descriptor_set,
+                .dstBinding = 0,
+                .descriptorCount = 1,
+                .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+                .pBufferInfo = &model_buffer_descriptor,
+            },
         };
 
+        // Обновляем оба набора дескрипторов
         vkUpdateDescriptorSets(
             context.device,
-            1,
-            &descriptor_write,
+            2,
+            descriptor_writes,
             0,
             nullptr
         );
@@ -725,16 +988,31 @@ namespace application {
             nullptr
         );
 
+        // Уничтожаем схемы наборов дескрипторов
         vkDestroyDescriptorSetLayout(
             context.device,
-            vk_descriptor_set_layout,
+            vk_scene_descriptor_set_layout,
             nullptr
         );
 
+        vkDestroyDescriptorSetLayout(
+            context.device,
+            vk_model_descriptor_set_layout,
+            nullptr
+        );
+
+        // Освобождаем буфер общих данных сцены
         vmaDestroyBuffer(
             context.allocator,
-            vk_uniform_buffer,
-            vk_uniform_buffer_allocation
+            vk_scene_uniform_buffer,
+            vk_scene_uniform_buffer_allocation
+        );
+
+        // Освобождаем буфер данных модели
+        vmaDestroyBuffer(
+            context.allocator,
+            vk_model_uniform_buffer,
+            vk_model_uniform_buffer_allocation
         );
 
         vkDestroyShaderModule(context.device, vk_vertex_shader, nullptr);
@@ -777,6 +1055,35 @@ namespace application {
             use_perspective ? "Perspective" : "Orthographic"
         );
 
+        ImGui::Separator();
+        ImGui::Text("Camera");
+
+        // Управление положением камеры
+        ImGui::SliderFloat3(
+            "Camera Position",
+            camera_position,
+            -10.0f,
+            10.0f
+        );
+
+        // Управление углами поворота камеры
+        ImGui::SliderFloat3(
+            "Camera Rotation",
+            camera_rotation,
+            -180.0f,
+            180.0f
+        );
+
+        // Управление углом обзора перспективной камеры
+        ImGui::SliderFloat(
+            "Camera FOV",
+            &camera_fov,
+            20.0f,
+            110.0f
+        );
+
+        ImGui::Separator();
+
         // Перемещение по трём осям
         ImGui::SliderFloat3(
             "Position",
@@ -801,8 +1108,42 @@ namespace application {
             2.0f
         );
 
-        // Выбор цветового множителя
-        ImGui::ColorEdit3("Color", object_color);
+        // Параметры материала
+        ImGui::Separator();
+        ImGui::Text("Material");
+
+        ImGui::ColorEdit3("Albedo", object_color);
+        ImGui::ColorEdit3("Specular", material_specular);
+
+        ImGui::SliderFloat(
+            "Shininess",
+            &material_alpha,
+            1.0f,
+            256.0f
+        );
+
+        // Параметры освещения сцены
+        ImGui::Separator();
+        ImGui::Text("Lighting");
+
+        ImGui::SliderFloat3(
+            "Light Direction",
+            light_direction,
+            -1.0f,
+            1.0f
+        );
+
+        ImGui::ColorEdit3("Light Color", light_color);
+
+        ImGui::SliderFloat(
+            "Light Intensity",
+            &light_intensity,
+            0.0f,
+            5.0f
+        );
+
+        ImGui::ColorEdit3("Ambient Light", ambient_color);
+
 
         ImGui::Separator();
         ImGui::Text("Animation");
@@ -970,10 +1311,26 @@ namespace application {
             )
         );
 
-        // Матрица вида: положение и ориентация камеры
+        // Переводим углы поворота камеры из градусов в радианы
+        float camera_angle_x = camera_rotation[0] * degToRad;
+        float camera_angle_y = camera_rotation[1] * degToRad;
+        float camera_angle_z = camera_rotation[2] * degToRad;
+
+        // Матрица вида — обратное преобразование камеры:
+        // сначала обратное перемещение, затем обратные повороты
         Mat4 view = multiply(
-            translation(0.0f, 0.0f, -6.0f),
-            multiply(rotationX(-0.7f), rotationY(0.4f))
+            rotationZ(-camera_angle_z),
+            multiply(
+                rotationY(-camera_angle_y),
+                multiply(
+                    rotationX(-camera_angle_x),
+                    translation(
+                        -camera_position[0],
+                        -camera_position[1],
+                        -camera_position[2]
+                    )
+                )
+            )
         );
 
         // Соотношение сторон окна
@@ -981,57 +1338,142 @@ namespace application {
             float(context.swapchain_extent.width) /
             float(context.swapchain_extent.height);
 
-        // Выбираем проекцию
+        // Выбираем матрицу проекции
         Mat4 projection = use_perspective
-            ? perspective(aspect)
+            ? perspective(aspect, camera_fov)
             : orthographic(aspect);
 
-        // Итоговая матрица Model-View-Projection
-        Mat4 mvp = multiply(
-            projection,
-            multiply(view, model)
+        // Матрица View-Projection общая для всех объектов сцены
+        Mat4 view_projection = multiply(projection, view);
+
+        // Заполняем общие данные сцены
+        SceneUniforms scene_ubo{};
+
+        std::memcpy(
+            scene_ubo.view_projection,
+            view_projection.data,
+            sizeof(view_projection.data)
         );
 
-		// Подготавливаем матрицу MVP и цвет для записи в Uniform Buffer
-        UniformBufferObject ubo{};
+        // Передаём положение камеры
+        std::memcpy(
+            scene_ubo.camera_position,
+            camera_position,
+            sizeof(camera_position)
+        );
 
-        std::memcpy(ubo.mvp, mvp.data, sizeof(mvp.data)); // куда, откуда, сколько байт
+        // Передаём направление направленного источника
+        std::memcpy(
+            scene_ubo.directional_light_direction,
+            light_direction,
+            sizeof(light_direction)
+        );
 
-        ubo.tint[0] = object_color[0];
-        ubo.tint[1] = object_color[1];
-        ubo.tint[2] = object_color[2];
-        ubo.tint[3] = 1.0f;
+        // Цвет источника умножаем на его интенсивность
+        for (int i = 0; i < 3; ++i) {
+            scene_ubo.directional_light_color[i] =
+                light_color[i] * light_intensity;
+        }
 
-        VmaAllocationInfo uniform_allocation{}; // структура с информацией о выделении памяти для Uniform Buffer
+        // Передаём фоновое освещение
+        std::memcpy(
+            scene_ubo.ambient_light,
+            ambient_color,
+            sizeof(ambient_color)
+        );
+
+        // Точечные источники и прожекторы добавим позже
+        scene_ubo.point_light_count = 0;
+        scene_ubo.spot_light_count = 0;
+
+        // Заполняем данные конкретной модели
+        ModelUniform model_ubo{};
+
+        std::memcpy(
+            model_ubo.model,
+            model.data,
+            sizeof(model.data)
+        );
+
+        // Основной цвет материала
+        std::memcpy(
+            model_ubo.albedo,
+            object_color,
+            sizeof(object_color)
+        );
+
+        // Цвет зеркального отражения
+        std::memcpy(
+            model_ubo.specular,
+            material_specular,
+            sizeof(material_specular)
+        );
+
+        // Коэффициент блеска
+        model_ubo.alpha = material_alpha;
+
+        // Получаем доступ к памяти буфера сцены
+        VmaAllocationInfo scene_allocation{};
 
         vmaGetAllocationInfo(
             context.allocator,
-            vk_uniform_buffer_allocation,
-            &uniform_allocation
+            vk_scene_uniform_buffer_allocation,
+            &scene_allocation
         );
 
-		// Копируем данные в выделенную память
+        // Копируем параметры сцены в Uniform Buffer
         std::memcpy(
-			uniform_allocation.pMappedData, // указатель на выделенную память
-            &ubo,
-            sizeof(ubo)
+            scene_allocation.pMappedData,
+            &scene_ubo,
+            sizeof(scene_ubo)
         );
 
-		// Обеспечиваем видимость данных для GPU
+        // Делаем изменения видимыми для GPU
         vmaFlushAllocation(
             context.allocator,
-            vk_uniform_buffer_allocation,
+            vk_scene_uniform_buffer_allocation,
             0,
-            sizeof(ubo)
+            sizeof(scene_ubo)
         );
 
-        vkCmdBindDescriptorSets( // привязывает Descriptor Set к графическому конвейеру
+        // Получаем доступ к памяти буфера модели
+        VmaAllocationInfo model_allocation{};
+
+        vmaGetAllocationInfo(
+            context.allocator,
+            vk_model_uniform_buffer_allocation,
+            &model_allocation
+        );
+
+        // Копируем параметры модели в Uniform Buffer
+        std::memcpy(
+            model_allocation.pMappedData,
+            &model_ubo,
+            sizeof(model_ubo)
+        );
+
+        // Делаем изменения видимыми для GPU
+        vmaFlushAllocation(
+            context.allocator,
+            vk_model_uniform_buffer_allocation,
+            0,
+            sizeof(model_ubo)
+        );
+
+        // Собираем два набора дескрипторов в массив
+        const VkDescriptorSet descriptor_sets[] = {
+            vk_scene_descriptor_set,
+            vk_model_descriptor_set,
+        };
+
+        // Подключаем наборы сцены и модели к графическому конвейеру
+        vkCmdBindDescriptorSets(
             fd.command_buffer,
             VK_PIPELINE_BIND_POINT_GRAPHICS,
             vk_pipeline_layout,
             0,
-            1,
-            &vk_descriptor_set,
+            2,
+            descriptor_sets,
             0,
             nullptr
         );
@@ -1039,7 +1481,7 @@ namespace application {
         // Рисуем наши 60 индексов
         vkCmdDrawIndexed(
             fd.command_buffer,
-            uint32_t(sizeof(indices) / sizeof(indices[0])),
+            static_cast<uint32_t>(expanded_indices.size()),
             1,
             0,
             0,
