@@ -1,16 +1,16 @@
 #version 450
 
-// Входные атрибуты вершины
+// Р’С…РѕРґРЅС‹Рµ Р°С‚СЂРёР±СѓС‚С‹ РІРµСЂС€РёРЅС‹
 layout(location = 0) in vec3 inPosition;
 layout(location = 1) in vec3 inNormal;
 
-// Мировая позиция вершины для фрагментного шейдера
+// РњРёСЂРѕРІР°СЏ РїРѕР·РёС†РёСЏ РІРµСЂС€РёРЅС‹ РґР»СЏ С„СЂР°РіРјРµРЅС‚РЅРѕРіРѕ С€РµР№РґРµСЂР°
 layout(location = 0) out vec3 fragWorldPosition;
 
-// Нормаль в мировых координатах
+// РќРѕСЂРјР°Р»СЊ РІ РјРёСЂРѕРІС‹С… РєРѕРѕСЂРґРёРЅР°С‚Р°С…
 layout(location = 1) out vec3 fragWorldNormal;
 
-// Общие данные сцены (набор 0)
+// РћР±С‰РёРµ РґР°РЅРЅС‹Рµ СЃС†РµРЅС‹ (РЅР°Р±РѕСЂ 0)
 layout(std140, set = 0, binding = 0) uniform SceneUniforms {
     mat4 view_projection;
     vec3 camera_position;
@@ -21,7 +21,7 @@ layout(std140, set = 0, binding = 0) uniform SceneUniforms {
     uint spot_light_count;
 } scene_uniforms;
 
-// Данные модели (набор 1)
+// Р”Р°РЅРЅС‹Рµ РјРѕРґРµР»Рё (РЅР°Р±РѕСЂ 1)
 layout(std140, set = 1, binding = 0) uniform ModelUniform {
     mat4 model;
     vec3 albedo;
@@ -30,18 +30,18 @@ layout(std140, set = 1, binding = 0) uniform ModelUniform {
 } model_uniforms;
 
 void main() {
-    // Переводим вершину из локальных координат в мировые
+    // РџРµСЂРµРІРѕРґРёРј РІРµСЂС€РёРЅСѓ РёР· Р»РѕРєР°Р»СЊРЅС‹С… РєРѕРѕСЂРґРёРЅР°С‚ РІ РјРёСЂРѕРІС‹Рµ
     vec4 worldPosition =
         model_uniforms.model * vec4(inPosition, 1.0);
 
-    // Преобразуем мировую позицию в координаты отсечения
+    // РџСЂРµРѕР±СЂР°Р·СѓРµРј РјРёСЂРѕРІСѓСЋ РїРѕР·РёС†РёСЋ РІ РєРѕРѕСЂРґРёРЅР°С‚С‹ РѕС‚СЃРµС‡РµРЅРёСЏ
     gl_Position =
         scene_uniforms.view_projection * worldPosition;
 
-    // Передаём мировую позицию во фрагментный шейдер
+    // РџРµСЂРµРґР°С‘Рј РјРёСЂРѕРІСѓСЋ РїРѕР·РёС†РёСЋ РІРѕ С„СЂР°РіРјРµРЅС‚РЅС‹Р№ С€РµР№РґРµСЂ
     fragWorldPosition = worldPosition.xyz;
 
-    // Преобразуем нормаль в мировые координаты
+    // РџСЂРµРѕР±СЂР°Р·СѓРµРј РЅРѕСЂРјР°Р»СЊ РІ РјРёСЂРѕРІС‹Рµ РєРѕРѕСЂРґРёРЅР°С‚С‹
     fragWorldNormal =
         mat3(model_uniforms.model) * inNormal;
 }

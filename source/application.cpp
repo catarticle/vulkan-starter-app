@@ -161,6 +161,14 @@ namespace application {
     VkBuffer vk_scene_uniform_buffer = VK_NULL_HANDLE;
     VmaAllocation vk_scene_uniform_buffer_allocation = nullptr;
 
+    // Буфер для массива точечных источников света
+    VkBuffer vk_point_lights_buffer = VK_NULL_HANDLE;
+    VmaAllocation vk_point_lights_buffer_allocation = nullptr;
+
+    // Буфер массива прожекторных источников света
+    VkBuffer vk_spot_lights_buffer = VK_NULL_HANDLE;
+    VmaAllocation vk_spot_lights_buffer_allocation = nullptr;
+
     // Буфер данных модели
     VkBuffer vk_model_uniform_buffer = VK_NULL_HANDLE;
     VmaAllocation vk_model_uniform_buffer_allocation = nullptr;
@@ -218,6 +226,71 @@ namespace application {
         // Коэффициент блеска материала
         float alpha;
     };
+
+    // Структура точечного источника для Storage Buffer
+    struct alignas(16) PointLightGpu {
+        alignas(16) float position[3];
+        alignas(16) float color[3];
+    };
+
+    // Проверяем соответствие стандарту std430
+    static_assert(sizeof(PointLightGpu) == 32);
+    static_assert(offsetof(PointLightGpu, color) == 16);
+
+    // Параметры источника, доступные пользователю
+    struct PointLightSettings {
+        float position[3];
+        float color[3];
+        float intensity;
+    };
+
+    // Максимальное число источников в выделенной памяти GPU
+    constexpr uint32_t MAX_POINT_LIGHTS = 32;
+
+    // Список активных точечных источников
+    std::vector<PointLightSettings> point_lights = {
+        {{2.0f, 1.5f, 2.0f}, {1.0f, 0.8f, 0.6f}, 5.0f}
+    };
+
+    // Структура прожектора для передачи в Storage Buffer
+    struct alignas(16) SpotLightGpu {
+        alignas(16) float position[3];
+        alignas(16) float color[3];
+        alignas(16) float direction[3];
+        float inner_angle;
+        float outer_angle;
+    };
+
+    // Проверяем расположение полей согласно std430
+    static_assert(sizeof(SpotLightGpu) == 64);
+    static_assert(offsetof(SpotLightGpu, inner_angle) == 44);
+    static_assert(offsetof(SpotLightGpu, outer_angle) == 48);
+
+    // Параметры прожектора для управления через ImGui
+    struct SpotLightSettings {
+        float position[3];
+        float color[3];
+        float direction[3];
+        float intensity;
+        float inner_angle;
+        float outer_angle;
+    };
+
+    // Максимальное количество прожекторов в буфере
+    constexpr uint32_t MAX_SPOT_LIGHTS = 32;
+
+    // Массив активных прожекторов
+    std::vector<SpotLightSettings> spot_lights = {
+        {
+            {0.0f, 0.0f, 3.0f},
+            {1.0f, 1.0f, 0.8f},
+            {0.0f, 0.0f, -1.0f},
+            10.0f,
+            15.0f,
+            35.0f
+        }
+    };
+
 
     // Проверяем размеры структур для std140
     static_assert(sizeof(SceneUniforms) == 144);
@@ -697,7 +770,8 @@ namespace application {
             &allocation_info
         );
 
-		std::memcpy( // копируем данные вершин в выделенную память; функция копирует sizeof(vertices) байт из массива vertices в память, на которую указывает allocation_info.pMappedData
+        // Копируем все вершины с нормалями в вершинный буфер
+		std::memcpy( 
             allocation_info.pMappedData,
             vertices_with_normals.data(),
             vertex_data_size
@@ -812,6 +886,47 @@ namespace application {
             return false;
         }
 
+        // Описываем Storage Buffer для точечных источников
+        const VkBufferCreateInfo point_buffer_info{
+            .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+            .size = sizeof(PointLightGpu) * MAX_POINT_LIGHTS,
+            .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+            .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+        };
+
+        // Создаём буфер и выделяем доступную CPU память
+        if (vmaCreateBuffer(
+            context.allocator,
+            &point_buffer_info,
+            &uniform_allocation_info,
+            &vk_point_lights_buffer,
+            &vk_point_lights_buffer_allocation,
+            nullptr
+        ) != VK_SUCCESS) {
+            return false;
+        }
+
+
+        // Описываем Storage Buffer для массива прожекторов
+        const VkBufferCreateInfo spot_buffer_info{
+            .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+            .size = sizeof(SpotLightGpu) * MAX_SPOT_LIGHTS,
+            .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+            .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+        };
+
+        // Создаём буфер и выделяем память через VMA
+        if (vmaCreateBuffer(
+            context.allocator,
+            &spot_buffer_info,
+            &uniform_allocation_info,
+            &vk_spot_lights_buffer,
+            &vk_spot_lights_buffer_allocation,
+            nullptr
+        ) != VK_SUCCESS) {
+            return false;
+        }
+
         // Привязка Uniform Buffer с общими данными сцены
         const VkDescriptorSetLayoutBinding scene_ubo_binding{
             .binding = 0,
@@ -819,6 +934,29 @@ namespace application {
             .descriptorCount = 1,
             .stageFlags = VK_SHADER_STAGE_VERTEX_BIT |
                           VK_SHADER_STAGE_FRAGMENT_BIT,
+        };
+
+        // Привязка Storage Buffer с точечными источниками
+        const VkDescriptorSetLayoutBinding point_ssbo_binding{
+            .binding = 1,
+            .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+            .descriptorCount = 1,
+            .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
+        };
+
+        // Привязка Storage Buffer с прожекторами
+        const VkDescriptorSetLayoutBinding spot_ssbo_binding{
+            .binding = 2,
+            .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+            .descriptorCount = 1,
+            .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
+        };
+
+        // Все ресурсы набора дескрипторов сцены
+        const VkDescriptorSetLayoutBinding scene_bindings[] = {
+            scene_ubo_binding,
+            point_ssbo_binding,
+            spot_ssbo_binding,
         };
 
         // Привязка Uniform Buffer с данными модели
@@ -833,8 +971,8 @@ namespace application {
         // Описываем схему набора дескрипторов сцены
         const VkDescriptorSetLayoutCreateInfo scene_layout_info{
             .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
-            .bindingCount = 1,
-            .pBindings = &scene_ubo_binding,
+            .bindingCount = 3,
+            .pBindings = scene_bindings,
         };
 
         // Создаём схему набора дескрипторов сцены
@@ -864,16 +1002,23 @@ namespace application {
             return false;
         }
 
-        const VkDescriptorPoolSize pool_size{ // количество дескрипторов определённого типа
-            .type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
-            .descriptorCount = 2,
+        // Пул содержит два дескриптора Uniform Buffer и два Storage Buffer
+        const VkDescriptorPoolSize pool_sizes[] = {
+            {
+                .type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+                .descriptorCount = 2,
+            },
+            {
+                .type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                .descriptorCount = 2,
+            },
         };
 
         const VkDescriptorPoolCreateInfo pool_info{
             .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
             .maxSets = 2,
-            .poolSizeCount = 1,
-            .pPoolSizes = &pool_size,
+            .poolSizeCount = 2,
+            .pPoolSizes = pool_sizes,
         };
 
         if (vkCreateDescriptorPool(
@@ -928,6 +1073,20 @@ namespace application {
             .range = sizeof(ModelUniform),
         };
 
+        // Указываем Storage Buffer с массивом точечных источников
+        const VkDescriptorBufferInfo point_buffer_descriptor{
+            .buffer = vk_point_lights_buffer,
+            .offset = 0,
+            .range = sizeof(PointLightGpu) * MAX_POINT_LIGHTS,
+        };
+
+        // Информация о Storage Buffer с прожекторами
+        const VkDescriptorBufferInfo spot_buffer_descriptor{
+            .buffer = vk_spot_lights_buffer,
+            .offset = 0,
+            .range = sizeof(SpotLightGpu) * MAX_SPOT_LIGHTS,
+        };
+
         vk_vertex_shader = loadShader("shaders/basic.vert.spv");
         vk_fragment_shader = loadShader("shaders/basic.frag.spv");
 
@@ -955,12 +1114,28 @@ namespace application {
                 .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
                 .pBufferInfo = &model_buffer_descriptor,
             },
+            {
+                .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                .dstSet = vk_scene_descriptor_set,
+                .dstBinding = 1,
+                .descriptorCount = 1,
+                .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                .pBufferInfo = &point_buffer_descriptor,
+            },
+            {
+                .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                .dstSet = vk_scene_descriptor_set,
+                .dstBinding = 2,
+                .descriptorCount = 1,
+                .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                .pBufferInfo = &spot_buffer_descriptor,
+            },
         };
 
         // Обновляем оба набора дескрипторов
         vkUpdateDescriptorSets(
             context.device,
-            2,
+            4,
             descriptor_writes,
             0,
             nullptr
@@ -1013,6 +1188,20 @@ namespace application {
             context.allocator,
             vk_model_uniform_buffer,
             vk_model_uniform_buffer_allocation
+        );
+
+        // Освобождаем Storage Buffer точечных источников
+        vmaDestroyBuffer(
+            context.allocator,
+            vk_point_lights_buffer,
+            vk_point_lights_buffer_allocation
+        );
+
+        // Освобождаем Storage Buffer прожекторов
+        vmaDestroyBuffer(
+            context.allocator,
+            vk_spot_lights_buffer,
+            vk_spot_lights_buffer_allocation
         );
 
         vkDestroyShaderModule(context.device, vk_vertex_shader, nullptr);
@@ -1083,6 +1272,7 @@ namespace application {
         );
 
         ImGui::Separator();
+        ImGui::Text("Object");
 
         // Перемещение по трём осям
         ImGui::SliderFloat3(
@@ -1143,6 +1333,145 @@ namespace application {
         );
 
         ImGui::ColorEdit3("Ambient Light", ambient_color);
+
+        ImGui::Separator();
+        ImGui::Text("Point Lights");
+
+        // Кнопка добавления нового точечного источника
+        if (ImGui::Button("Add Point Light") &&
+            point_lights.size() < MAX_POINT_LIGHTS) {
+
+            point_lights.push_back({
+                {2.0f, 1.5f, 2.0f},
+                {1.0f, 1.0f, 1.0f},
+                5.0f
+                });
+        }
+
+        // Настройки каждого активного источника
+        for (std::size_t i = 0; i < point_lights.size(); ++i) {
+            ImGui::PushID(static_cast<int>(i));
+
+            ImGui::Text("Point Light %d", static_cast<int>(i + 1));
+
+            // Положение источника
+            ImGui::SliderFloat3(
+                "Position",
+                point_lights[i].position,
+                -5.0f,
+                5.0f
+            );
+
+            // Цвет источника
+            ImGui::ColorEdit3("Color", point_lights[i].color);
+
+            // Интенсивность источника
+            ImGui::SliderFloat(
+                "Intensity",
+                &point_lights[i].intensity,
+                0.0f,
+                20.0f
+            );
+
+            // Удаление источника
+            if (ImGui::Button("Remove")) {
+                point_lights.erase(point_lights.begin() + i);
+                ImGui::PopID();
+                break;
+            }
+
+            ImGui::Separator();
+            ImGui::PopID();
+        }
+
+
+        ImGui::Separator();
+        ImGui::Text("Spot Lights");
+
+        // Добавление нового прожектора
+        if (ImGui::Button("Add Spot Light") &&
+            spot_lights.size() < MAX_SPOT_LIGHTS) {
+
+            spot_lights.push_back({
+                {0.0f, 0.0f, 3.0f},
+                {1.0f, 1.0f, 1.0f},
+                {0.0f, 0.0f, -1.0f},
+                10.0f,
+                15.0f,
+                35.0f
+                });
+        }
+
+        // Отдельная область идентификаторов для прожекторов
+        ImGui::PushID("SpotLights");
+
+        // Настройка всех активных прожекторов
+        for (std::size_t i = 0; i < spot_lights.size(); ++i) {
+            ImGui::PushID(static_cast<int>(i));
+
+            ImGui::Text("Spot Light %d", static_cast<int>(i + 1));
+
+            // Положение источника в пространстве
+            ImGui::SliderFloat3(
+                "Position",
+                spot_lights[i].position,
+                -5.0f,
+                5.0f
+            );
+
+            // Направление светового конуса
+            ImGui::SliderFloat3(
+                "Direction",
+                spot_lights[i].direction,
+                -1.0f,
+                1.0f
+            );
+
+            // Цвет и интенсивность источника
+            ImGui::ColorEdit3("Color", spot_lights[i].color);
+
+            ImGui::SliderFloat(
+                "Intensity",
+                &spot_lights[i].intensity,
+                0.0f,
+                20.0f
+            );
+
+            // Внутренний и внешний углы светового конуса
+            ImGui::SliderFloat(
+                "Inner Angle",
+                &spot_lights[i].inner_angle,
+                1.0f,
+                89.0f
+            );
+
+            ImGui::SliderFloat(
+                "Outer Angle",
+                &spot_lights[i].outer_angle,
+                1.0f,
+                89.0f
+            );
+
+            // Внешний угол не должен быть меньше внутреннего
+            if (spot_lights[i].outer_angle <
+                spot_lights[i].inner_angle) {
+
+                spot_lights[i].outer_angle =
+                    spot_lights[i].inner_angle;
+            }
+
+            // Удаление прожектора
+            if (ImGui::Button("Remove")) {
+                spot_lights.erase(spot_lights.begin() + i);
+                ImGui::PopID();
+                break;
+            }
+
+            ImGui::Separator();
+            ImGui::PopID();
+        }
+
+        ImGui::PopID();
 
 
         ImGui::Separator();
@@ -1382,9 +1711,13 @@ namespace application {
             sizeof(ambient_color)
         );
 
-        // Точечные источники и прожекторы добавим позже
-        scene_ubo.point_light_count = 0;
-        scene_ubo.spot_light_count = 0;
+        // Передаём количество активных точечных источников
+        scene_ubo.point_light_count =
+            static_cast<uint32_t>(point_lights.size());
+
+        // Передаём количество активных прожекторов
+        scene_ubo.spot_light_count =
+            static_cast<uint32_t>(spot_lights.size());
 
         // Заполняем данные конкретной модели
         ModelUniform model_ubo{};
@@ -1465,6 +1798,98 @@ namespace application {
             vk_scene_descriptor_set,
             vk_model_descriptor_set,
         };
+
+        // Подготавливаем массив точечных источников для GPU
+        std::array<PointLightGpu, MAX_POINT_LIGHTS> gpu_point_lights{};
+
+        for (std::size_t i = 0; i < point_lights.size(); ++i) {
+            for (int j = 0; j < 3; ++j) {
+                // Копируем положение источника
+                gpu_point_lights[i].position[j] =
+                    point_lights[i].position[j];
+
+                // Учитываем интенсивность источника в его цвете
+                gpu_point_lights[i].color[j] =
+                    point_lights[i].color[j] * point_lights[i].intensity;
+            }
+        }
+
+        // Получаем доступ к памяти Storage Buffer
+        VmaAllocationInfo point_allocation{};
+
+        vmaGetAllocationInfo(
+            context.allocator,
+            vk_point_lights_buffer_allocation,
+            &point_allocation
+        );
+
+        // Копируем массив источников в Storage Buffer
+        std::memcpy(
+            point_allocation.pMappedData,
+            gpu_point_lights.data(),
+            sizeof(gpu_point_lights)
+        );
+
+        // Делаем изменения видимыми для GPU
+        vmaFlushAllocation(
+            context.allocator,
+            vk_point_lights_buffer_allocation,
+            0,
+            VK_WHOLE_SIZE
+        );
+
+
+        // Подготавливаем данные прожекторов для GPU
+        std::array<SpotLightGpu, MAX_SPOT_LIGHTS> gpu_spot_lights{};
+
+        for (std::size_t i = 0; i < spot_lights.size(); ++i) {
+            for (int j = 0; j < 3; ++j) {
+
+                // Копируем положение прожектора
+                gpu_spot_lights[i].position[j] =
+                    spot_lights[i].position[j];
+
+                // Копируем направление прожектора
+                gpu_spot_lights[i].direction[j] =
+                    spot_lights[i].direction[j];
+
+                // Учитываем интенсивность в цвете
+                gpu_spot_lights[i].color[j] =
+                    spot_lights[i].color[j] *
+                    spot_lights[i].intensity;
+            }
+
+            // Передаём углы конуса в градусах
+            gpu_spot_lights[i].inner_angle =
+                spot_lights[i].inner_angle;
+
+            gpu_spot_lights[i].outer_angle =
+                spot_lights[i].outer_angle;
+        }
+
+        // Получаем доступ к памяти Storage Buffer прожекторов
+        VmaAllocationInfo spot_allocation{};
+
+        vmaGetAllocationInfo(
+            context.allocator,
+            vk_spot_lights_buffer_allocation,
+            &spot_allocation
+        );
+
+        // Копируем массив прожекторов в буфер
+        std::memcpy(
+            spot_allocation.pMappedData,
+            gpu_spot_lights.data(),
+            sizeof(gpu_spot_lights)
+        );
+
+        // Делаем записанные данные видимыми для GPU
+        vmaFlushAllocation(
+            context.allocator,
+            vk_spot_lights_buffer_allocation,
+            0,
+            VK_WHOLE_SIZE
+        );
 
         // Подключаем наборы сцены и модели к графическому конвейеру
         vkCmdBindDescriptorSets(
